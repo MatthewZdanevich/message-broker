@@ -143,8 +143,8 @@ void* message_processor(void *arg) {
     while (1) {
         dequeue_message(&msg);
         store_message(msg.topic, msg.data);
-        char send_buffer[MAX_MESSAGE_LEN + 1]; // +1 для \n
-        snprintf(send_buffer, MAX_MESSAGE_LEN + 1, "%s\n", msg.data);
+        char send_buffer[MAX_TOPIC_LEN + MAX_MESSAGE_LEN + 10]; // +1 для \n
+        snprintf(send_buffer, MAX_MESSAGE_LEN + 1, "PUBLISH %s %s\n", msg.topic, msg.data);
         for (int i = 0; i < subscriber_count; i++) {
             if (strcmp(subscribers[i].topic, msg.topic) == 0) {
                 size_t len = strlen(send_buffer);

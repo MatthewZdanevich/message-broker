@@ -9,6 +9,7 @@
 #include <sys/epoll.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <sys/sysinfo.h>
 
 #define SERVER_IP "127.0.0.1"
 #define SERVER_PORT 8080
@@ -21,17 +22,41 @@ void set_non_blocking(int sock) {
     fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 }
 
+int count_cpu_cores() {
+    FILE *file = fopen("/proc/cpuinfo", "r");
+    if (!file) return -1;
+
+    int cores = 0;
+    char line[128];
+    while (fgets(line, sizeof(line), file)) {
+        if (strncmp(line, "processor", 9) == 0) {
+            cores++;
+        }
+    }
+    fclose(file);
+    return cores;
+}
+
+
 // Чтение загрузки CPU
 double get_cpu_usage() {
-    FILE *fp = fopen("/proc/stat", "r");
-    if (!fp) return 0.0;
-    char buffer[256];
-    unsigned long user, nice, system, idle;
-    fgets(buffer, sizeof(buffer), fp);
-    sscanf(buffer, "cpu %lu %lu %lu %lu", &user, &nice, &system, &idle);
-    fclose(fp);
-    unsigned long total = user + nice + system + idle;
-    return (total - idle) * 100.0 / total;
+    struct sysinfo info;
+    if (sysinfo(&info) != 0) {
+        perror("sysinfo");
+        return 1;
+    }
+
+    return (((double)info.loads[0] / (1 << SI_LOAD_SHIFT)) / count_cpu_cores()) * 100;
+
+    // FILE *fp = fopen("/proc/stat", "r");
+    // if (!fp) return 0.0;
+    // char buffer[256];
+    // unsigned long user, nice, system, idle;
+    // fgets(buffer, sizeof(buffer), fp);
+    // sscanf(buffer, "cpu %lu %lu %lu %lu", &user, &nice, &system, &idle);
+    // fclose(fp);
+    // unsigned long total = user + nice + system + idle;
+    // return (total - idle) * 100.0 / total;
 }
 
 int main() {
