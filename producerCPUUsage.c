@@ -10,13 +10,14 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/sysinfo.h>
+#include <sys/timerfd.h>
+#include <inttypes.h>
 
 #define SERVER_IP "127.0.0.1"
 #define SERVER_PORT 8080
 #define MAX_MESSAGE_LEN 1024
 #define MAX_EVENTS 10
 
-// Установка неблокирующего режима
 void set_non_blocking(int sock) {
     int flags = fcntl(sock, F_GETFL, 0);
     fcntl(sock, F_SETFL, flags | O_NONBLOCK);
@@ -28,7 +29,7 @@ int count_cpu_cores() {
 
     int cores = 0;
     char line[128];
-    while (fgets(line, sizeof(line), file)) {
+    while (fgets(line, sizeof(line), file) {
         if (strncmp(line, "processor", 9) == 0) {
             cores++;
         }
@@ -37,8 +38,6 @@ int count_cpu_cores() {
     return cores;
 }
 
-
-// Чтение загрузки CPU
 double get_cpu_usage() {
     struct sysinfo info;
     if (sysinfo(&info) != 0) {
@@ -47,16 +46,6 @@ double get_cpu_usage() {
     }
 
     return (((double)info.loads[0] / (1 << SI_LOAD_SHIFT)) / count_cpu_cores()) * 100;
-
-    // FILE *fp = fopen("/proc/stat", "r");
-    // if (!fp) return 0.0;
-    // char buffer[256];
-    // unsigned long user, nice, system, idle;
-    // fgets(buffer, sizeof(buffer), fp);
-    // sscanf(buffer, "cpu %lu %lu %lu %lu", &user, &nice, &system, &idle);
-    // fclose(fp);
-    // unsigned long total = user + nice + system + idle;
-    // return (total - idle) * 100.0 / total;
 }
 
 int main() {
@@ -72,9 +61,11 @@ int main() {
     server_addr.sin_port = htons(SERVER_PORT);
     inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr);
 
-    // Асинхронное подключение
+    // Создаем epoll
     int epoll_fd = epoll_create1(0);
     struct epoll_event ev, events[MAX_EVENTS];
+
+    // Добавляем сокет в epoll для отслеживания подключения
     ev.events = EPOLLOUT;
     ev.data.fd = sock;
     epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock, &ev);
@@ -84,14 +75,59 @@ int main() {
         return 1;
     }
 
+    // Создаем таймер
+    int timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
+    if (timer_fd == -1) {
+        perror("timerfd_create");
+        return 1;
+    }
+
+    // Настраиваем таймер на срабатывание каждые 5 секунд
+    struct itimerspec timer_spec = {
+        .it_interval = {.tv_sec = 5, .tv_nsec = 0},  // интервал
+        .it_value = {.tv_sec = 5, .tv_nsec = 0}      // первое срабатывание
+    };
+    if (timerfd_settime(timer_fd, 0, &timer_spec, NULL) == -1) {
+        perror("timerfd_settime");
+        close(timer_fd);
+        return 1;
+    }
+
+    // Добавляем таймер в epoll
+    ev.events = EPOLLIN;
+    ev.data.fd = timer_fd;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, timer_fd, &ev) == -1) {
+        perror("epoll_ctl: timer_fd");
+        close(timer_fd);
+        return 1;
+    }
+
     char send_buffer[MAX_MESSAGE_LEN * 10] = {0};
     size_t send_buffer_len = 0;
-    time_t last_send = time(NULL);
 
     while (1) {
-        int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, 1000);
+        int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
         for (int i = 0; i < nfds; i++) {
-            if (events[i].data.fd == sock && (events[i].events & EPOLLOUT)) {
+            if (events[i].data.fd == timer_fd && (events[i].events & EPOLLIN)) {
+                // Обработка срабатывания таймера
+                uint64_t expirations;
+                read(timer_fd, &expirations, sizeof(expirations));
+
+                // Формирование нового сообщения
+                double cpu_usage = get_cpu_usage();
+                char message[MAX_MESSAGE_LEN];
+                snprintf(message, MAX_MESSAGE_LEN, "PUBLISH system.cpu CPU Usage: %.2f%%\n", cpu_usage);
+                size_t len = strlen(message);
+                if (send_buffer_len + len < sizeof(send_buffer)) {
+                    memcpy(send_buffer + send_buffer_len, message, len);
+                    send_buffer_len += len;
+                    ev.events = EPOLLOUT;
+                    ev.data.fd = sock;
+                    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, sock, &ev);
+                    printf("Queued: %s", message);
+                }
+            }
+            else if (events[i].data.fd == sock && (events[i].events & EPOLLOUT)) {
                 // Проверка состояния подключения
                 int error;
                 socklen_t len = sizeof(error);
@@ -114,24 +150,9 @@ int main() {
                 }
             }
         }
-
-        // Формирование нового сообщения каждые 5 секунд
-        if (time(NULL) - last_send >= 5) {
-            double cpu_usage = get_cpu_usage();
-            char message[MAX_MESSAGE_LEN];
-            snprintf(message, MAX_MESSAGE_LEN, "PUBLISH system.cpu CPU Usage: %.2f%%\n", cpu_usage);
-            size_t len = strlen(message);
-            if (send_buffer_len + len < sizeof(send_buffer)) {
-                memcpy(send_buffer + send_buffer_len, message, len);
-                send_buffer_len += len;
-                ev.events = EPOLLOUT;
-                epoll_ctl(epoll_fd, EPOLL_CTL_MOD, sock, &ev);
-                printf("Queued: %s", message);
-            }
-            last_send = time(NULL);
-        }
     }
 
+    close(timer_fd);
     close(sock);
     close(epoll_fd);
     return 0;
