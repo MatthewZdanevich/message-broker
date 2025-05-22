@@ -13,8 +13,6 @@
 #include <sys/timerfd.h>
 #include <inttypes.h>
 
-#define SERVER_IP "127.0.0.1"
-#define SERVER_PORT 8080
 #define MAX_MESSAGE_LEN 1024
 #define MAX_EVENTS 10
 
@@ -49,6 +47,9 @@ double get_cpu_usage() {
 }
 
 int main() {
+    const char* SERVER_IP = getenv("SERVER_IP") ? getenv("SERVER_IP") : "127.0.0.1";
+    int SERVER_PORT = getenv("SERVER_PORT") ? atoi(getenv("SERVER_PORT")) : 8080;
+
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         perror("Socket creation failed");

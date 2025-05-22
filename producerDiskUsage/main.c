@@ -9,9 +9,8 @@
 #include <sys/epoll.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <sys/statvfs.h>
 
-#define SERVER_IP "127.0.0.1"
-#define SERVER_PORT 8080
 #define MAX_MESSAGE_LEN 1024
 #define MAX_EVENTS 10
 
@@ -21,21 +20,21 @@ void set_non_blocking(int sock) {
     fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 }
 
-// Чтение средней загрузки системы из /proc/loadavg
-void get_load_average(double *load1, double *load5, double *load15) {
-    FILE *fp = fopen("/proc/loadavg", "r");
-    if (!fp) {
-        *load1 = 0.0;
-        *load5 = 0.0;
-        *load15 = 0.0;
-        return;
-    }
+// Чтение использования диска
+double get_disk_usage() {
+    struct statvfs stat;
+    if (statvfs("/", &stat) != 0) return 0.0;
 
-    fscanf(fp, "%lf %lf %lf", load1, load5, load15);
-    fclose(fp);
+    unsigned long total = stat.f_blocks * stat.f_frsize;
+    unsigned long free = stat.f_bfree * stat.f_frsize;
+    if (total == 0) return 0.0;
+    return (total - free) * 100.0 / total;
 }
 
 int main() {
+    const char* SERVER_IP = getenv("SERVER_IP") ? getenv("SERVER_IP") : "127.0.0.1";
+    int SERVER_PORT = getenv("SERVER_PORT") ? atoi(getenv("SERVER_PORT")) : 8080;
+
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         perror("Socket creation failed");
@@ -93,11 +92,9 @@ int main() {
 
         // Формирование нового сообщения каждые 5 секунд
         if (time(NULL) - last_send >= 5) {
-            double load1, load5, load15;
-            get_load_average(&load1, &load5, &load15);
-
+            double disk_usage = get_disk_usage();
             char message[MAX_MESSAGE_LEN];
-            snprintf(message, MAX_MESSAGE_LEN, "PUBLISH system.load Load Average: 1m %.2f, 5m %.2f, 15m %.2f\n", load1, load5, load15);
+            snprintf(message, MAX_MESSAGE_LEN, "PUBLISH system.disk Disk Usage: %.2f%%\n", disk_usage);
             size_t len = strlen(message);
             if (send_buffer_len + len < sizeof(send_buffer)) {
                 memcpy(send_buffer + send_buffer_len, message, len);

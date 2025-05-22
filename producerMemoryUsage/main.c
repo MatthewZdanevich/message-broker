@@ -9,10 +9,7 @@
 #include <sys/epoll.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <dirent.h>
 
-#define SERVER_IP "127.0.0.1"
-#define SERVER_PORT 8080
 #define MAX_MESSAGE_LEN 1024
 #define MAX_EVENTS 10
 
@@ -22,26 +19,30 @@ void set_non_blocking(int sock) {
     fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 }
 
-// Подсчет количества процессов через /proc
-int get_process_count() {
-    DIR *dir = opendir("/proc");
-    if (!dir) return 0;
+// Чтение использования памяти из /proc/meminfo
+double get_memory_usage() {
+    FILE *fp = fopen("/proc/meminfo", "r");
+    if (!fp) return 0.0;
 
-    int count = 0;
-    struct dirent *entry;
-    while ((entry = readdir(dir))) {
-        // Проверяем, является ли имя каталога числом (PID процесса)
-        char *endptr;
-        strtol(entry->d_name, &endptr, 10);
-        if (*endptr == '\0') {
-            count++;
+    char buffer[256];
+    unsigned long total = 0, free = 0;
+    while (fgets(buffer, sizeof(buffer), fp)) {
+        if (strncmp(buffer, "MemTotal:", 9) == 0) {
+            sscanf(buffer, "MemTotal: %lu", &total);
+        } else if (strncmp(buffer, "MemFree:", 8) == 0) {
+            sscanf(buffer, "MemFree: %lu", &free);
         }
     }
-    closedir(dir);
-    return count;
+    fclose(fp);
+
+    if (total == 0) return 0.0;
+    return (total - free) * 100.0 / total;
 }
 
 int main() {
+    const char* SERVER_IP = getenv("SERVER_IP") ? getenv("SERVER_IP") : "127.0.0.1";
+    int SERVER_PORT = getenv("SERVER_PORT") ? atoi(getenv("SERVER_PORT")) : 8080;
+
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         perror("Socket creation failed");
@@ -99,9 +100,9 @@ int main() {
 
         // Формирование нового сообщения каждые 5 секунд
         if (time(NULL) - last_send >= 5) {
-            int process_count = get_process_count();
+            double mem_usage = get_memory_usage();
             char message[MAX_MESSAGE_LEN];
-            snprintf(message, MAX_MESSAGE_LEN, "PUBLISH system.processes Process Count: %d\n", process_count);
+            snprintf(message, MAX_MESSAGE_LEN, "PUBLISH system.memory Memory Usage: %.2f%%\n", mem_usage);
             size_t len = strlen(message);
             if (send_buffer_len + len < sizeof(send_buffer)) {
                 memcpy(send_buffer + send_buffer_len, message, len);
