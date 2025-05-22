@@ -29,7 +29,7 @@ int count_cpu_cores() {
 
     int cores = 0;
     char line[128];
-    while (fgets(line, sizeof(line), file) {
+    while (fgets(line, sizeof(line), file)) {
         if (strncmp(line, "processor", 9) == 0) {
             cores++;
         }
@@ -120,7 +120,7 @@ int main() {
                 size_t len = strlen(message);
                 if (send_buffer_len + len < sizeof(send_buffer)) {
                     memcpy(send_buffer + send_buffer_len, message, len);
-                    send_buffer_len += len;
+                    send_buffer_len += len; 
                     ev.events = EPOLLOUT;
                     ev.data.fd = sock;
                     epoll_ctl(epoll_fd, EPOLL_CTL_MOD, sock, &ev);
