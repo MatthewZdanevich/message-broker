@@ -1,12 +1,15 @@
 import sys
 import socket
 import threading
+from datetime import datetime
 from collections import deque
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QPushButton, QComboBox, QLabel, QTabWidget, QFrame)
+                             QPushButton, QComboBox, QLabel, QTabWidget, QFrame, QFileDialog)
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 from PyQt6.QtGui import QPainter
+
+from ClientLogger import ClientLogger
 
 MAX_DATA_POINTS = 60
 
@@ -52,10 +55,16 @@ class ProducerChart(QWidget):
         layout.addWidget(self.chart_view)
         layout.addWidget(self.info_label)
         
+        btn_layout = QHBoxLayout()
         self.unsubscribe_btn = QPushButton("Unsubscribe")
         self.unsubscribe_btn.clicked.connect(self.unsubscribe)
-        layout.addWidget(self.unsubscribe_btn)
+        btn_layout.addWidget(self.unsubscribe_btn)
         
+        self.save_logs_btn = QPushButton("Save Logs")
+        self.save_logs_btn.clicked.connect(self.save_logs)
+        btn_layout.addWidget(self.save_logs_btn)
+        
+        layout.addLayout(btn_layout)
         self.setLayout(layout)
     
     def setup_axis_y(self):
@@ -79,6 +88,23 @@ class ProducerChart(QWidget):
     
     def unsubscribe(self):
         self.main_window.unsubscribe_from_topic(self.topic)
+    
+    def save_logs(self):
+        """Сохранение логов для текущего топика"""
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Save Logs", "", "Text Files (*.txt);;All Files (*)"
+        )
+        if filename:
+            # Фильтруем логи по текущему топику
+            topic_logs = [log for log in self.main_window.logger.logs if log['topic'] == self.topic]
+            
+            try:
+                with open(filename, 'w') as f:
+                    for log in topic_logs:
+                        f.write(f"[{log['timestamp']}] [{log['level']}] {log['message']}\n")
+                self.main_window.logger.log('INFO', f"Saved logs for topic {self.topic} to {filename}")
+            except Exception as e:
+                self.main_window.logger.log('ERROR', f"Failed to save logs: {str(e)}", self.topic)
     
     def update_chart(self, value, text_info=None):
         self.data.append(value)
@@ -117,9 +143,11 @@ class SubscriptionClient:
             self.thread.start()
             self.send_command(f"SUBSCRIBE {self.topic}")
             self.main_window.signals.connection_status.emit(self.topic, f"Connected to broker for {self.topic}")
+            self.main_window.logger.log('INFO', f"Connected to broker", self.topic)
             return True
         except Exception as e:
             self.main_window.signals.connection_status.emit(self.topic, f"Connection failed for {self.topic}: {str(e)}")
+            self.main_window.logger.log('ERROR', f"Connection failed: {str(e)}", self.topic)
             self.running = False
             return False
     
@@ -127,8 +155,10 @@ class SubscriptionClient:
         if self.sock and self.running:
             try:
                 self.sock.sendall(f"{command}\n".encode())
+                self.main_window.logger.log('DEBUG', f"Sent command: {command}", self.topic)
             except Exception as e:
                 self.main_window.signals.connection_status.emit(self.topic, f"Send failed for {self.topic}: {str(e)}")
+                self.main_window.logger.log('ERROR', f"Send failed: {str(e)}", self.topic)
                 self.running = False
     
     def read_from_broker(self):
@@ -138,16 +168,19 @@ class SubscriptionClient:
                 data = self.sock.recv(4096)
                 if not data:
                     self.main_window.signals.connection_status.emit(self.topic, f"Connection closed by broker for {self.topic}")
+                    self.main_window.logger.log('WARNING', "Connection closed by broker", self.topic)
                     break
                 
                 buffer += data.decode()
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
                     self.main_window.signals.message_received.emit(self.topic, line.strip())
+                    self.main_window.logger.log('DEBUG', f"Received: {line.strip()}", self.topic)
             except socket.timeout:
                 continue
             except Exception as e:
                 self.main_window.signals.connection_status.emit(self.topic, f"Error reading from broker for {self.topic}: {str(e)}")
+                self.main_window.logger.log('ERROR', f"Read error: {str(e)}", self.topic)
                 break
     
     def disconnect(self):
@@ -157,6 +190,7 @@ class SubscriptionClient:
         if self.sock:
             try:
                 self.send_command(f"UNSUBSCRIBE {self.topic}")
+                self.main_window.logger.log('INFO', "Unsubscribed from topic", self.topic)
             finally:
                 self.sock.close()
 
@@ -168,6 +202,7 @@ class BrokerClient(QMainWindow):
         
         self.subscriptions = {}  # topic: {'chart': chart, 'client': client}
         self.running = False
+        self.logger = ClientLogger()  # Инициализация логгера
         
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -179,6 +214,8 @@ class BrokerClient(QMainWindow):
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.check_connections)
         self.update_timer.start(1000)
+        
+        self.logger.log('INFO', 'Application started')
     
     def setup_ui(self):
         control_panel = QWidget()
@@ -197,11 +234,15 @@ class BrokerClient(QMainWindow):
         self.subscribe_btn = QPushButton("Subscribe")
         self.subscribe_btn.clicked.connect(self.subscribe_to_topic)
         
+        self.save_all_logs_btn = QPushButton("Save All Logs")
+        self.save_all_logs_btn.clicked.connect(self.save_all_logs)
+        
         self.status_label = QLabel("Ready to subscribe")
         
         control_layout.addWidget(QLabel("Topic:"))
         control_layout.addWidget(self.topic_combo)
         control_layout.addWidget(self.subscribe_btn)
+        control_layout.addWidget(self.save_all_logs_btn)
         control_layout.addWidget(self.status_label)
         
         self.tab_widget = QTabWidget()
@@ -221,12 +262,27 @@ class BrokerClient(QMainWindow):
         self.signals.message_received.connect(self.process_broker_message)
         self.signals.connection_status.connect(self.update_status)
     
+    def save_all_logs(self):
+        """Сохранение всех логов в файл"""
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Save All Logs", "", "Text Files (*.txt);;All Files (*)"
+        )
+        if filename:
+            if self.logger.save_logs_to_file(filename):
+                self.status_label.setText(f"All logs saved to {filename}")
+                self.logger.log('INFO', f"All logs saved to {filename}")
+            else:
+                self.status_label.setText("Failed to save logs")
+    
     def update_status(self, topic, message):
         if topic == "":
             self.status_label.setText(message)
         else:
             if topic in self.subscriptions:
                 self.subscriptions[topic]['chart'].info_label.setText(message)
+        
+        # Логируем изменение статуса
+        self.logger.log('INFO', message, topic if topic else None)
     
     def subscribe_to_topic(self):
         topic = self.topic_combo.currentText()
@@ -238,9 +294,11 @@ class BrokerClient(QMainWindow):
                 self.tab_widget.addTab(chart, topic)
                 self.tab_widget.setCurrentWidget(chart)
                 self.signals.connection_status.emit("", f"Subscribed to {topic}")
+                self.logger.log('INFO', f"Subscribed to topic {topic}")
         else:
             self.tab_widget.setCurrentWidget(self.subscriptions[topic]['chart'])
             self.signals.connection_status.emit("", f"Already subscribed to {topic}")
+            self.logger.log('INFO', f"Already subscribed to {topic}")
     
     def unsubscribe_from_topic(self, topic):
         if topic in self.subscriptions:
@@ -252,6 +310,7 @@ class BrokerClient(QMainWindow):
                 self.tab_widget.removeTab(index)
             chart.deleteLater()
             self.signals.connection_status.emit("", f"Unsubscribed from {topic}")
+            self.logger.log('INFO', f"Unsubscribed from topic {topic}")
     
     def close_tab(self, index):
         widget = self.tab_widget.widget(index)
@@ -264,6 +323,7 @@ class BrokerClient(QMainWindow):
         for topic, sub in list(self.subscriptions.items()):
             if not sub['client'].running:
                 self.signals.connection_status.emit(topic, f"Connection lost for {topic}")
+                self.logger.log('WARNING', f"Connection lost for topic {topic}")
                 self.reconnect_subscription(topic)
     
     def reconnect_subscription(self, topic):
@@ -272,8 +332,10 @@ class BrokerClient(QMainWindow):
             if not client.running:
                 if client.connect():
                     self.signals.connection_status.emit(topic, f"Reconnected to {topic}")
+                    self.logger.log('INFO', f"Reconnected to topic {topic}")
                 else:
                     self.signals.connection_status.emit(topic, f"Reconnection failed for {topic}")
+                    self.logger.log('ERROR', f"Reconnection failed for topic {topic}")
     
     def process_broker_message(self, topic, message):
         if topic not in self.subscriptions:
@@ -287,8 +349,10 @@ class BrokerClient(QMainWindow):
                     
                 content = parts[2]
                 self.update_chart_data(topic, content)
+                self.logger.log('DEBUG', f"Received data: {content}", topic)
             except Exception as e:
-                print(f"Error processing PUBLISH message for {topic}: {e}")
+                error_msg = f"Error processing PUBLISH message for {topic}: {e}"
+                self.logger.log('ERROR', error_msg, topic)
     
     def update_chart_data(self, topic, content):
         chart = self.subscriptions[topic]['chart']
@@ -317,15 +381,14 @@ class BrokerClient(QMainWindow):
         elif topic == "system.load":
             if "Load Average:" in content:
                 try:
-                    # Обработка формата: "Load Average: 1m 0.15, 5m 0.10, 15m 0.05"
                     parts = content.split("Load Average:")[1].strip().split(",")
                     load1 = float(parts[0].strip().split()[1])
                     load5 = float(parts[1].strip().split()[1])
                     load15 = float(parts[2].strip().split()[1])
-                    value = load1  # Используем 1-минутное среднее для графика
+                    value = load1
                     text_info = f"1m: {load1:.2f}, 5m: {load5:.2f}, 15m: {load15:.2f}"
                 except (IndexError, ValueError) as e:
-                    print(f"Error parsing load average for {topic}: {e}")
+                    self.logger.log('ERROR', f"Error parsing load average: {e}", topic)
                     return
         
         if value is not None:
@@ -334,6 +397,7 @@ class BrokerClient(QMainWindow):
     def closeEvent(self, event):
         for topic in list(self.subscriptions.keys()):
             self.unsubscribe_from_topic(topic)
+        self.logger.log('INFO', 'Application closed')
         event.accept()
 
 if __name__ == "__main__":
