@@ -4,10 +4,11 @@ import threading
 from datetime import datetime
 from collections import deque
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QPushButton, QComboBox, QLabel, QTabWidget, QFrame, QFileDialog)
+                             QPushButton, QComboBox, QLabel, QTabWidget, QFrame, QFileDialog,
+                             QLineEdit, QDialog, QDialogButtonBox, QFormLayout)
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
-from PyQt6.QtGui import QPainter
+from PyQt6.QtGui import QPainter, QIntValidator
 
 from ClientLogger import ClientLogger
 
@@ -16,6 +17,29 @@ MAX_DATA_POINTS = 60
 class BrokerSignals(QObject):
     message_received = pyqtSignal(str, str)  # topic, message
     connection_status = pyqtSignal(str, str)  # topic, status
+
+class ConnectionDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Broker Connection Settings")
+        
+        layout = QFormLayout(self)
+        
+        self.host_input = QLineEdit("127.0.0.1")
+        self.port_input = QLineEdit("8080")
+        self.port_input.setValidator(QIntValidator(1, 65535))
+        
+        layout.addRow("Broker Host:", self.host_input)
+        layout.addRow("Broker Port:", self.port_input)
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        
+        layout.addRow(buttons)
+    
+    def get_settings(self):
+        return self.host_input.text(), int(self.port_input.text())
 
 class ProducerChart(QWidget):
     def __init__(self, topic, tab_widget, main_window, parent=None):
@@ -131,12 +155,14 @@ class SubscriptionClient:
         self.sock = None
         self.running = False
         self.thread = None
+        self.broker_host = main_window.broker_host
+        self.broker_port = main_window.broker_port
         
     def connect(self):
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.settimeout(1)
-            self.sock.connect(("127.0.0.1", 8080))
+            self.sock.connect((self.broker_host, self.broker_port))
             self.running = True
             self.thread = threading.Thread(target=self.read_from_broker)
             self.thread.daemon = True
@@ -200,6 +226,10 @@ class BrokerClient(QMainWindow):
         self.setWindowTitle("Broker Client")
         self.setGeometry(100, 100, 800, 600)
         
+        # Default broker settings
+        self.broker_host = "127.0.0.1"
+        self.broker_port = 8080
+        
         self.subscriptions = {}  # topic: {'chart': chart, 'client': client}
         self.running = False
         self.logger = ClientLogger()  # Инициализация логгера
@@ -216,6 +246,9 @@ class BrokerClient(QMainWindow):
         self.update_timer.start(1000)
         
         self.logger.log('INFO', 'Application started')
+        
+        # Show connection dialog at startup
+        self.show_connection_dialog()
     
     def setup_ui(self):
         control_panel = QWidget()
@@ -237,12 +270,16 @@ class BrokerClient(QMainWindow):
         self.save_all_logs_btn = QPushButton("Save All Logs")
         self.save_all_logs_btn.clicked.connect(self.save_all_logs)
         
+        self.connection_settings_btn = QPushButton("Connection Settings")
+        self.connection_settings_btn.clicked.connect(self.show_connection_dialog)
+        
         self.status_label = QLabel("Ready to subscribe")
         
         control_layout.addWidget(QLabel("Topic:"))
         control_layout.addWidget(self.topic_combo)
         control_layout.addWidget(self.subscribe_btn)
         control_layout.addWidget(self.save_all_logs_btn)
+        control_layout.addWidget(self.connection_settings_btn)
         control_layout.addWidget(self.status_label)
         
         self.tab_widget = QTabWidget()
@@ -261,6 +298,18 @@ class BrokerClient(QMainWindow):
         self.signals = BrokerSignals()
         self.signals.message_received.connect(self.process_broker_message)
         self.signals.connection_status.connect(self.update_status)
+    
+    def show_connection_dialog(self):
+        dialog = ConnectionDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.broker_host, self.broker_port = dialog.get_settings()
+            self.status_label.setText(f"Broker set to {self.broker_host}:{self.broker_port}")
+            self.logger.log('INFO', f"Broker connection settings changed to {self.broker_host}:{self.broker_port}")
+            
+            # Reconnect all subscriptions with new settings
+            for topic in list(self.subscriptions.keys()):
+                self.unsubscribe_from_topic(topic)
+                self.subscribe_to_topic(topic)
     
     def save_all_logs(self):
         """Сохранение всех логов в файл"""
