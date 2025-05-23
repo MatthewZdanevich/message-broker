@@ -126,6 +126,7 @@ int main() {
                     ev.data.fd = sock;
                     epoll_ctl(epoll_fd, EPOLL_CTL_MOD, sock, &ev);
                     printf("Queued: %s", message);
+                    fflush(stdout);
                 }
             }
             else if (events[i].data.fd == sock && (events[i].events & EPOLLOUT)) {

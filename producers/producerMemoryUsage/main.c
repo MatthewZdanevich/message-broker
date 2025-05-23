@@ -9,7 +9,6 @@
 #include <sys/epoll.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <sys/statvfs.h>
 
 #define MAX_MESSAGE_LEN 1024
 #define MAX_EVENTS 10
@@ -20,13 +19,22 @@ void set_non_blocking(int sock) {
     fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 }
 
-// Чтение использования диска
-double get_disk_usage() {
-    struct statvfs stat;
-    if (statvfs("/", &stat) != 0) return 0.0;
+// Чтение использования памяти из /proc/meminfo
+double get_memory_usage() {
+    FILE *fp = fopen("/proc/meminfo", "r");
+    if (!fp) return 0.0;
 
-    unsigned long total = stat.f_blocks * stat.f_frsize;
-    unsigned long free = stat.f_bfree * stat.f_frsize;
+    char buffer[256];
+    unsigned long total = 0, free = 0;
+    while (fgets(buffer, sizeof(buffer), fp)) {
+        if (strncmp(buffer, "MemTotal:", 9) == 0) {
+            sscanf(buffer, "MemTotal: %lu", &total);
+        } else if (strncmp(buffer, "MemFree:", 8) == 0) {
+            sscanf(buffer, "MemFree: %lu", &free);
+        }
+    }
+    fclose(fp);
+
     if (total == 0) return 0.0;
     return (total - free) * 100.0 / total;
 }
@@ -92,9 +100,9 @@ int main() {
 
         // Формирование нового сообщения каждые 5 секунд
         if (time(NULL) - last_send >= 5) {
-            double disk_usage = get_disk_usage();
+            double mem_usage = get_memory_usage();
             char message[MAX_MESSAGE_LEN];
-            snprintf(message, MAX_MESSAGE_LEN, "PUBLISH system.disk Disk Usage: %.2f%%\n", disk_usage);
+            snprintf(message, MAX_MESSAGE_LEN, "PUBLISH system.memory Memory Usage: %.2f%%\n", mem_usage);
             size_t len = strlen(message);
             if (send_buffer_len + len < sizeof(send_buffer)) {
                 memcpy(send_buffer + send_buffer_len, message, len);
@@ -102,6 +110,7 @@ int main() {
                 ev.events = EPOLLOUT;
                 epoll_ctl(epoll_fd, EPOLL_CTL_MOD, sock, &ev);
                 printf("Queued: %s", message);
+                fflush(stdout);
             }
             last_send = time(NULL);
         }

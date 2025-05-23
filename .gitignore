@@ -1,6 +1,10 @@
 # Prerequisites
 *.d
 
+# Env
+.env
+
+# Build
 bin/
 
 # Object files

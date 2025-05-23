@@ -1,0 +1,39 @@
+services:
+  producerCPUUsage:
+    image: wowich/producer_cpu_usage
+    network_mode: host
+    restart: unless-stopped
+    env_file: 
+      - .env
+  producerDiskUsage:
+    image: wowich/producer_disk_usage
+    network_mode: host
+    restart: unless-stopped
+    env_file: 
+      - .env
+  producerMemoryUsage:
+    image: wowich/producer_memory_usage
+    network_mode: host
+    restart: unless-stopped
+    env_file: 
+      - .env
+  producerNetworkUsage:
+    image: wowich/producer_network_usage
+    network_mode: host
+    restart: unless-stopped
+    env_file: 
+      - .env
+  producerProcessCount:
+    image: wowich/producer_process_count
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - /proc:/host_proc:ro
+    env_file: 
+      - .env
+  producerSystemLoadAverage:
+    image: wowich/producer_system_load_average
+    network_mode: host
+    restart: unless-stopped
+    env_file: 
+      - .env

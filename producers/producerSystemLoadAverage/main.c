@@ -19,37 +19,17 @@ void set_non_blocking(int sock) {
     fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 }
 
-// Чтение использования сети из /proc/net/dev
-void get_network_usage(unsigned long *rx_bytes, unsigned long *tx_bytes) {
-    FILE *fp = fopen("/proc/net/dev", "r");
+// Чтение средней загрузки системы из /proc/loadavg
+void get_load_average(double *load1, double *load5, double *load15) {
+    FILE *fp = fopen("/proc/loadavg", "r");
     if (!fp) {
-        *rx_bytes = 0;
-        *tx_bytes = 0;
+        *load1 = 0.0;
+        *load5 = 0.0;
+        *load15 = 0.0;
         return;
     }
 
-    char buffer[256];
-    *rx_bytes = 0;
-    *tx_bytes = 0;
-
-    // Пропускаем заголовки
-    for (int i = 0; i < 2; i++) {
-        if (!fgets(buffer, sizeof(buffer), fp)) {
-            fclose(fp);
-            return;
-        }
-    }
-
-    // Читаем данные по всем интерфейсам
-    while (fgets(buffer, sizeof(buffer), fp)) {
-        char iface[32];
-        unsigned long rx, tx, dummy;
-        // Формат: iface: rx_bytes ... tx_bytes ...
-        sscanf(buffer, "%s %lu %lu %lu %lu %lu %lu %lu %lu %lu",
-               iface, &rx, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &tx);
-        *rx_bytes += rx;
-        *tx_bytes += tx;
-    }
+    fscanf(fp, "%lf %lf %lf", load1, load5, load15);
     fclose(fp);
 }
 
@@ -84,7 +64,6 @@ int main() {
     char send_buffer[MAX_MESSAGE_LEN * 10] = {0};
     size_t send_buffer_len = 0;
     time_t last_send = time(NULL);
-    unsigned long prev_rx = 0, prev_tx = 0;
 
     while (1) {
         int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, 1000);
@@ -115,17 +94,11 @@ int main() {
 
         // Формирование нового сообщения каждые 5 секунд
         if (time(NULL) - last_send >= 5) {
-            unsigned long rx_bytes, tx_bytes;
-            get_network_usage(&rx_bytes, &tx_bytes);
-
-            // Вычисляем скорость (байт/с)
-            double rx_speed = (rx_bytes - prev_rx) / 5.0 / 1024.0; // KiB/s
-            double tx_speed = (tx_bytes - prev_tx) / 5.0 / 1024.0; // KiB/s
-            prev_rx = rx_bytes;
-            prev_tx = tx_bytes;
+            double load1, load5, load15;
+            get_load_average(&load1, &load5, &load15);
 
             char message[MAX_MESSAGE_LEN];
-            snprintf(message, MAX_MESSAGE_LEN, "PUBLISH system.network Network: RX %.2f KiB/s, TX %.2f KiB/s\n", rx_speed, tx_speed);
+            snprintf(message, MAX_MESSAGE_LEN, "PUBLISH system.load Load Average: 1m %.2f, 5m %.2f, 15m %.2f\n", load1, load5, load15);
             size_t len = strlen(message);
             if (send_buffer_len + len < sizeof(send_buffer)) {
                 memcpy(send_buffer + send_buffer_len, message, len);
@@ -133,6 +106,7 @@ int main() {
                 ev.events = EPOLLOUT;
                 epoll_ctl(epoll_fd, EPOLL_CTL_MOD, sock, &ev);
                 printf("Queued: %s", message);
+                fflush(stdout);
             }
             last_send = time(NULL);
         }

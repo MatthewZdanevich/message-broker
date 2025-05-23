@@ -9,7 +9,6 @@
 #include <sys/epoll.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <dirent.h>
 
 #define MAX_MESSAGE_LEN 1024
 #define MAX_EVENTS 10
@@ -20,29 +19,44 @@ void set_non_blocking(int sock) {
     fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 }
 
-// Подсчет количества процессов через /proc
-int get_process_count() {
-    DIR *dir = opendir("/proc");
-    if (!dir) return 0;
+// Чтение использования сети из /proc/net/dev
+void get_network_usage(unsigned long *rx_bytes, unsigned long *tx_bytes) {
+    FILE *fp = fopen("/proc/net/dev", "r");
+    if (!fp) {
+        *rx_bytes = 0;
+        *tx_bytes = 0;
+        return;
+    }
 
-    int count = 0;
-    struct dirent *entry;
-    while ((entry = readdir(dir))) {
-        // Проверяем, является ли имя каталога числом (PID процесса)
-        char *endptr;
-        strtol(entry->d_name, &endptr, 10);
-        if (*endptr == '\0') {
-            count++;
+    char buffer[256];
+    *rx_bytes = 0;
+    *tx_bytes = 0;
+
+    // Пропускаем заголовки
+    for (int i = 0; i < 2; i++) {
+        if (!fgets(buffer, sizeof(buffer), fp)) {
+            fclose(fp);
+            return;
         }
     }
-    closedir(dir);
-    return count;
+
+    // Читаем данные по всем интерфейсам
+    while (fgets(buffer, sizeof(buffer), fp)) {
+        char iface[32];
+        unsigned long rx, tx, dummy;
+        // Формат: iface: rx_bytes ... tx_bytes ...
+        sscanf(buffer, "%s %lu %lu %lu %lu %lu %lu %lu %lu %lu",
+               iface, &rx, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &tx);
+        *rx_bytes += rx;
+        *tx_bytes += tx;
+    }
+    fclose(fp);
 }
 
 int main() {
     const char* SERVER_IP = getenv("SERVER_IP") ? getenv("SERVER_IP") : "127.0.0.1";
     int SERVER_PORT = getenv("SERVER_PORT") ? atoi(getenv("SERVER_PORT")) : 8080;
-    
+
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         perror("Socket creation failed");
@@ -70,6 +84,7 @@ int main() {
     char send_buffer[MAX_MESSAGE_LEN * 10] = {0};
     size_t send_buffer_len = 0;
     time_t last_send = time(NULL);
+    unsigned long prev_rx = 0, prev_tx = 0;
 
     while (1) {
         int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, 1000);
@@ -100,9 +115,17 @@ int main() {
 
         // Формирование нового сообщения каждые 5 секунд
         if (time(NULL) - last_send >= 5) {
-            int process_count = get_process_count();
+            unsigned long rx_bytes, tx_bytes;
+            get_network_usage(&rx_bytes, &tx_bytes);
+
+            // Вычисляем скорость (байт/с)
+            double rx_speed = (rx_bytes - prev_rx) / 5.0 / 1024.0; // KiB/s
+            double tx_speed = (tx_bytes - prev_tx) / 5.0 / 1024.0; // KiB/s
+            prev_rx = rx_bytes;
+            prev_tx = tx_bytes;
+
             char message[MAX_MESSAGE_LEN];
-            snprintf(message, MAX_MESSAGE_LEN, "PUBLISH system.processes Process Count: %d\n", process_count);
+            snprintf(message, MAX_MESSAGE_LEN, "PUBLISH system.network Network: RX %.2f KiB/s, TX %.2f KiB/s\n", rx_speed, tx_speed);
             size_t len = strlen(message);
             if (send_buffer_len + len < sizeof(send_buffer)) {
                 memcpy(send_buffer + send_buffer_len, message, len);
@@ -110,6 +133,7 @@ int main() {
                 ev.events = EPOLLOUT;
                 epoll_ctl(epoll_fd, EPOLL_CTL_MOD, sock, &ev);
                 printf("Queued: %s", message);
+                fflush(stdout);
             }
             last_send = time(NULL);
         }
